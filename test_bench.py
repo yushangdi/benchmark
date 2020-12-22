@@ -78,7 +78,8 @@ class TestBenchNetwork:
             print('Method train is not implemented, skipping...')
 
     def test_eval(self, hub_model, benchmark):
-        try:
-            benchmark(hub_model.eval)
-        except NotImplementedError:
-            print('Method eval is not implemented, skipping...')
+        with torch.no_grad():
+            try:
+                benchmark(hub_model.eval)
+            except NotImplementedError:
+                print('Method eval is not implemented, skipping...')
