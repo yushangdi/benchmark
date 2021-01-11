@@ -30,7 +30,6 @@ def check_module_paths():
 def main():
     for benchmark_cls in list_models():
         for device in ("cpu", "cuda"):
-            name = benchmark_cls.name[:20]
             try:
                 benchmark = benchmark_cls(device=device)
                 model, example_inputs = benchmark.get_module()
@@ -39,9 +38,9 @@ def main():
                 model(*example_inputs)
                 torch.cuda.synchronize()
                 t1 = time.perf_counter()
-                print(f"{device:4} {name:20} took {t1 - t0:.2f}s")
+                print(f"{device:4} {benchmark.short_name:20} took {t1 - t0:.2f}s")
             except NotImplementedError:
-                log.info(f"{device} {name} NotImplementedError")
+                pass
 
 
 if __name__ == '__main__':
