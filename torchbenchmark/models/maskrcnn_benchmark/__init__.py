@@ -55,7 +55,8 @@ class Model:
                              'SOLVER.MAX_ITER', '720000', 
                              'SOLVER.STEPS', '(480000, 640000)', 
                              'TEST.IMS_PER_BATCH', '1', 
-                             'MODEL.RPN.FPN_POST_NMS_TOP_N_TRAIN', '2000'])
+                             'MODEL.RPN.FPN_POST_NMS_TOP_N_TRAIN', '2000',
+                             'OUTPUT_DIR', dirname])
 
         cfg.freeze()
         self.module = build_detection_model(cfg)
