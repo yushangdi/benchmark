@@ -1,10 +1,12 @@
 #!/usr/bin/env python
+from importlib import import_module
 import gc
 import logging
-import time
-import warnings
 import numpy as np
-from importlib import import_module
+import re
+import time
+import torch
+import warnings
 
 from torchbenchmark import list_models
 
@@ -18,7 +20,7 @@ def check_module_paths():
                 benchmark = benchmark_cls(device=device)
                 model, example_inputs = benchmark.get_module()
                 filename = import_module(model.__module__).__file__
-                log.info(f"{benchmark_cls.name} {filename}")
+                log.info(f"{benchmark_cls.name} {model.__module__}")
                 assert ("/torchbenchmark/models/" in filename or
                         "torchvision" in filename or
                         "/site-packages/torch/" in filename)
@@ -26,24 +28,23 @@ def check_module_paths():
                 log.info(f"{benchmark_cls.name} NotImplementedError")
 
 def main():
-    check_module_paths()
-    return
-
-    log.info("running...")
     for benchmark_cls in list_models():
-        try:
-            benchmark = benchmark_cls(device="cpu")
-            model, example_inputs = benchmark.get_module()
-            gc.collect()
-            t0 = time.perf_counter()
-            model(*example_inputs)
-            t1 = time.perf_counter()
-            log.info(f"{benchmark_cls.name} took {t1 - t0}")
-        except NotImplementedError:
-            log.info(f"{benchmark_cls.name} NotImplementedError")
+        for device in ("cpu", "cuda"):
+            name = benchmark_cls.name[:20]
+            try:
+                benchmark = benchmark_cls(device=device)
+                model, example_inputs = benchmark.get_module()
+                gc.collect()
+                t0 = time.perf_counter()
+                model(*example_inputs)
+                torch.cuda.synchronize()
+                t1 = time.perf_counter()
+                print(f"{device:4} {name:20} took {t1 - t0:.2f}s")
+            except NotImplementedError:
+                log.info(f"{device} {name} NotImplementedError")
 
 
 if __name__ == '__main__':
-    logging.basicConfig(level=logging.INFO)
+    logging.basicConfig(level=logging.WARNING)
     warnings.filterwarnings("ignore")
     main()
