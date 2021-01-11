@@ -61,8 +61,7 @@ def list_models():
         model_name = os.path.basename(model_path)
         module = importlib.import_module(f'.models.{model_name}', package=__name__)
         Model = getattr(module, 'Model')
-        if not hasattr(Model, 'name'):
-            Model.name = model_name
-        Model.short_name = short_name(Model.name)
+        Model.name = getattr(Model, 'name', model_name)
+        Model.short_name = getattr(Model, 'short_name', short_name(Model.name))
         models.append(Model)
     return models
