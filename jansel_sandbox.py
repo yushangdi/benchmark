@@ -32,6 +32,12 @@ def short_name(name, limit=20):
     return name if len(name) <= limit else f"{name[:limit - 3].rstrip('_')}..."
 
 
+def typestr(v):
+    if isinstance(v, (list, tuple)):
+        return f"({', '.join(map(typestr, v))})"
+    return type(v).__name__
+
+
 def main():
     for benchmark_cls in list_models():
         for device in ("cpu", "cuda"):
@@ -43,7 +49,7 @@ def main():
                 result = model(*example_inputs)
                 torch.cuda.synchronize()
                 t1 = time.perf_counter()
-                print(f"{device:4} {short_name(benchmark.name):20} took {t1 - t0:.4f}s {type(result)}")
+                print(f"{device:4} {short_name(benchmark.name):20} took {t1 - t0:.4f}s {typestr(result)}")
             except NotImplementedError:
                 pass
 
