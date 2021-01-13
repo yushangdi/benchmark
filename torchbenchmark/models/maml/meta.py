@@ -142,7 +142,7 @@ class Meta(nn.Module):
         self.meta_optim.step()
 
 
-        accs = np.array(corrects) / (querysz * task_num)
+        accs = torch.tensor(corrects) / (querysz * task_num)
 
         return accs
 
@@ -213,7 +213,7 @@ class Meta(nn.Module):
 
         del net
 
-        accs = np.array(corrects) / querysz
+        accs = torch.tensor(corrects) / querysz
 
         return accs
 
