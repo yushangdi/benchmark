@@ -47,6 +47,7 @@ class Model:
             ('linear', [args.n_way, 64])
         ]
         self.module = Meta(args, config).to(device)
+        self.model.eval()
         self.example_inputs = torch.load(f'{root}/batch.pt')
         self.example_inputs = tuple([torch.from_numpy(i).to(self.device) for i in self.example_inputs])
 
@@ -61,15 +62,15 @@ class Model:
             raise NotImplementedError()
         self.module.eval()
         for _ in range(niter):
-            self.module.finetunning(*[i[0] for i in self.example_inputs])
+            self.module(*self.example_inputs, train=False)
 
     def train(self, niter=1):
         if self.jit:
             raise NotImplementedError()
         self.module.train()
         for _ in range(niter):
-            self.module(*self.example_inputs)
-        
+            self.module(*self.example_inputs, train=True)
+
 
 if __name__ == '__main__':
     m = Model(device='cpu', jit=False)
