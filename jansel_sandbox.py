@@ -27,18 +27,23 @@ def check_module_paths():
             except NotImplementedError:
                 log.info(f"{benchmark_cls.name} NotImplementedError")
 
+
+def short_name(name, limit=20):
+    return name if len(name) <= limit else f"{name[:limit - 3].rstrip('_')}..."
+
+
 def main():
     for benchmark_cls in list_models():
         for device in ("cpu", "cuda"):
             try:
-                benchmark = benchmark_cls(device=device)
+                benchmark = benchmark_cls(device=device, jit=False)
                 model, example_inputs = benchmark.get_module()
                 gc.collect()
                 t0 = time.perf_counter()
-                model(*example_inputs)
+                result = model(*example_inputs)
                 torch.cuda.synchronize()
                 t1 = time.perf_counter()
-                print(f"{device:4} {benchmark.short_name:20} took {t1 - t0:.2f}s")
+                print(f"{device:4} {short_name(benchmark.name):20} took {t1 - t0:.4f}s {type(result)}")
             except NotImplementedError:
                 pass
 
