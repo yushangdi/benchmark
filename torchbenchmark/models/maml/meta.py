@@ -61,13 +61,13 @@ class Meta(nn.Module):
 
         return total_norm/counter
 
-    def forward(self, x_spt, y_spt, x_qry, y_qry, train=False):
-        if train:
-            return self.train(x_spt, y_spt, x_qry, y_qry)
+    def forward(self, x_spt, y_spt, x_qry, y_qry):
+        if self.training:
+            return self.forward_train(x_spt, y_spt, x_qry, y_qry)
         else:
             return self.finetunning(x_spt[0], y_spt[0], x_qry[0], y_qry[0])
 
-    def train(self, x_spt, y_spt, x_qry, y_qry):
+    def forward_train(self, x_spt, y_spt, x_qry, y_qry):
         """
 
         :param x_spt:   [b, setsz, c_, h, w]

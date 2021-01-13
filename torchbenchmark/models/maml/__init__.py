@@ -1,10 +1,9 @@
-from argparse import Namespace
-import torch
-from .meta import Meta
-
-
-import random
 import numpy as np
+import random
+import time
+import torch
+from argparse import Namespace
+from .meta import Meta
 from pathlib import Path
 
 torch.manual_seed(1337)
@@ -12,6 +11,7 @@ random.seed(1337)
 np.random.seed(1337)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
+
 
 class Model:
     def __init__(self, device='cpu', jit=False):
@@ -47,14 +47,13 @@ class Model:
             ('linear', [args.n_way, 64])
         ]
         self.module = Meta(args, config).to(device)
-        self.model.eval()
         self.example_inputs = torch.load(f'{root}/batch.pt')
         self.example_inputs = tuple([torch.from_numpy(i).to(self.device) for i in self.example_inputs])
 
-        
     def get_module(self):
         if self.jit:
             raise NotImplementedError()
+        self.module.eval()
         return self.module, self.example_inputs
 
     def eval(self, niter=1):
@@ -62,21 +61,20 @@ class Model:
             raise NotImplementedError()
         self.module.eval()
         for _ in range(niter):
-            self.module(*self.example_inputs, train=False)
+            self.module(*self.example_inputs)
 
     def train(self, niter=1):
         if self.jit:
             raise NotImplementedError()
         self.module.train()
         for _ in range(niter):
-            self.module(*self.example_inputs, train=True)
+            self.module(*self.example_inputs)
 
 
 if __name__ == '__main__':
     m = Model(device='cpu', jit=False)
     module, example_inputs = m.get_module()
     module(*example_inputs)
-    import time
     begin = time.time()
     m.train(niter=1)
     print(time.time() - begin)

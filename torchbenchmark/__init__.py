@@ -49,19 +49,13 @@ def setup():
         _install_deps(model_path)
 
 
-def short_name(name, limit=20):
-    if len(name) <= limit:
-        return name
-    return name[:limit - 3].rstrip("_") + "..."
-
-
 def list_models():
     models = []
     for model_path in _list_model_paths():
         model_name = os.path.basename(model_path)
         module = importlib.import_module(f'.models.{model_name}', package=__name__)
         Model = getattr(module, 'Model')
-        Model.name = getattr(Model, 'name', model_name)
-        Model.short_name = getattr(Model, 'short_name', short_name(Model.name))
+        if not hasattr(Model, 'name'):
+            Model.name = model_name
         models.append(Model)
     return models
