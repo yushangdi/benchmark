@@ -5,6 +5,7 @@ import sys
 import torch
 from urllib import request
 import importlib
+import logging
 
 proxy_suggestion = "Unable to verify https connectivity, " \
                    "required for setup.\n" \
@@ -13,6 +14,7 @@ proxy_suggestion = "Unable to verify https connectivity, " \
 this_dir = Path(__file__).parent.absolute()
 model_dir = 'models'
 install_file = 'install.py'
+log = logging.getLogger(__name__)
 
 
 def _test_https(test_url='https://github.com', timeout=0.5):
@@ -53,7 +55,11 @@ def list_models():
     models = []
     for model_path in _list_model_paths():
         model_name = os.path.basename(model_path)
-        module = importlib.import_module(f'.models.{model_name}', package=__name__)
+        try:
+            module = importlib.import_module(f'.models.{model_name}', package=__name__)
+        except Exception as e:
+            log.warning(f"Failed to import {model_name} -- {type(e).__name__}: {str(e)}")
+
         Model = getattr(module, 'Model')
         if not hasattr(Model, 'name'):
             Model.name = model_name

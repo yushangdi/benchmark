@@ -1,5 +1,8 @@
 #!/usr/bin/env python
 from importlib import import_module
+from torchbenchmark import list_models
+from torch.fx import symbolic_trace
+import argparse
 import gc
 import logging
 import numpy as np
@@ -8,9 +11,8 @@ import time
 import torch
 import warnings
 
-from torchbenchmark import list_models
-
 log = logging.getLogger(__name__)
+DEVICES = ("cpu", )  # "cuda"
 
 
 def check_module_paths():
@@ -39,8 +41,13 @@ def typestr(v):
 
 
 def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--filter", "-k")
+    args = parser.parse_args()
     for benchmark_cls in list_models():
-        for device in ("cpu", "cuda"):
+        if args.filter and args.filter not in benchmark_cls.name:
+            continue
+        for device in DEVICES:
             try:
                 benchmark = benchmark_cls(device=device, jit=False)
                 model, example_inputs = benchmark.get_module()
@@ -49,7 +56,15 @@ def main():
                 result = model(*example_inputs)
                 torch.cuda.synchronize()
                 t1 = time.perf_counter()
-                print(f"{device:4} {short_name(benchmark.name):20} took {t1 - t0:.4f}s {typestr(result)}")
+
+                try:
+                    torch.fx.symbolic_trace(model)
+                    fx_result = "OK"
+                except Exception as e:
+                    fx_result = f"{type(e).__name__}: {str(e)[:40]}"
+                    log.exception("")
+
+                print(f"{device:4} {short_name(benchmark.name):20} took {t1 - t0:.4f}s {fx_result}")
             except NotImplementedError:
                 pass
 
