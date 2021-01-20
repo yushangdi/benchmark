@@ -62,7 +62,7 @@ def main():
                     fx_result = "OK"
                 except Exception as e:
                     fx_result = f"{type(e).__name__}: {str(e)[:40]}"
-                    log.exception("")
+                    # log.exception("")
 
                 print(f"{device:4} {short_name(benchmark.name):20} took {t1 - t0:.4f}s {fx_result}")
             except NotImplementedError:
