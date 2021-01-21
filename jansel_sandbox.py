@@ -12,7 +12,7 @@ import torch
 import warnings
 
 log = logging.getLogger(__name__)
-DEVICES = ("cpu", )  # "cuda"
+DEVICES = ("cpu", "cuda")
 
 
 def check_module_paths():
