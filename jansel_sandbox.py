@@ -13,7 +13,8 @@ import torch  # noqa: E402
 import warnings  # noqa: E402
 
 log = logging.getLogger(__name__)
-DEVICES = ("cpu", "cuda")
+DEVICES = ("cpu", )
+# DEVICES = ("cpu", "cuda")
 
 
 def short_name(name, limit=20):

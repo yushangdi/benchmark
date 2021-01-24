@@ -27,7 +27,7 @@ class DemucsWrapper(torch.nn.Module):
         sources = streams[:, 1:]
         sources = self.augment(sources)
         mix = sources.sum(dim=1)
-        return self.model(mix)
+        return sources, self.model(mix)
 
 
 class Model:
@@ -70,12 +70,15 @@ class Model:
         # TODO: implement the eval version
         self.model.eval()
         for _ in range(niter):
-            self.model(*self.example_inputs)
+            sources, estimates = self.model(*self.example_inputs)
+            # Should these be included in eval?
+            sources = center_trim(sources, estimates)
+            loss = self.criterion(estimates, sources)
 
     def train(self, niter=1):
         self.model.train()
         for _ in range(niter):
-            estimates = self.model(*self.example_inputs)
+            sources, estimates = self.model(*self.example_inputs)
             sources = center_trim(sources, estimates)
             loss = self.criterion(estimates, sources)
             loss.backward()
