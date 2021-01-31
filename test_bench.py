@@ -17,22 +17,15 @@ import pytest
 import time
 import torch
 from torchbenchmark import list_models
+from torchbenchmark.util.machine_config import get_machine_state
 
-
-def pytest_generate_tests(metafunc, display_len=24):
+def pytest_generate_tests(metafunc):
     # This is where the list of models to test can be configured
     # e.g. by using info in metafunc.config
     all_models = list_models()
-    short_names = []
-    for model_class in all_models:
-        short = model_class.name
-        if len(short) > display_len:
-            short = short[:display_len] + "..."
-        short_names.append(short)
-
     if metafunc.cls and metafunc.cls.__name__ == "TestBenchNetwork":
         metafunc.parametrize('model_class', all_models,
-                             ids=short_names, scope="class")
+                             ids=[m.name for m in all_models], scope="class")
         metafunc.parametrize('device', ['cpu', 'cuda'], scope='class')
         metafunc.parametrize('compiler', ['jit', 'eager'], scope='class')
 
@@ -74,11 +67,13 @@ class TestBenchNetwork:
     def test_train(self, hub_model, benchmark):
         try:
             benchmark(hub_model.train)
+            benchmark.extra_info['machine_state'] = get_machine_state()
         except NotImplementedError:
             print('Method train is not implemented, skipping...')
 
     def test_eval(self, hub_model, benchmark):
         try:
             benchmark(hub_model.eval)
+            benchmark.extra_info['machine_state'] = get_machine_state()
         except NotImplementedError:
             print('Method eval is not implemented, skipping...')
