@@ -56,6 +56,8 @@ class Model:
         self.example_inputs = trainFrameIndex, *trainData
 
     def get_module(self):
+        if self.device == 'cpu':
+            raise NotImplementedError("Disabled due to excessively slow runtime - see GH Issue #100")
         return self.module, self.example_inputs
 
     def eval(self, niter=1):

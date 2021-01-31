@@ -13,8 +13,13 @@ import torch  # noqa: E402
 import warnings  # noqa: E402
 
 log = logging.getLogger(__name__)
-DEVICES = ("cpu", )
+DEVICES = ("cpu",)
 # DEVICES = ("cpu", "cuda")
+
+from torch.fx.symbolic_trace import _wrapped_fns_to_patch
+
+_wrapped_fns_to_patch.append((torch.__dict__, "ones"))
+_wrapped_fns_to_patch.append((torch.__dict__, "randint"))
 
 
 def short_name(name, limit=20):
@@ -29,6 +34,7 @@ def iter_models(args):
             try:
                 benchmark = benchmark_cls(device=device, jit=False)
                 model, example_inputs = benchmark.get_module()
+                model.eval()
                 gc.collect()
                 yield device, short_name(benchmark.name), model, example_inputs
             except NotImplementedError:
@@ -49,10 +55,23 @@ def main():
             torch.fx.symbolic_trace(model)
             fx_result = "OK"
         except Exception as e:
-            fx_result = f"{type(e).__name__}: {str(e)[:40]}"
-            # log.exception("")
+            fx_result = "FAIL"
+            # fx_result = f"{type(e).__name__}: {str(e)[:40]}"
+            # log.exception("FX_ERROR")
 
-        print(f"{device:4} {name:20} took {t1 - t0:.4f}s {fx_result}")
+        try:
+            torch.jit.script(model)
+            ts_result = "OK"
+        except Exception as e:
+            ts_result = "FAIL"
+
+        try:
+            torch.jit.script(torch.fx.symbolic_trace(model))
+            fxts_result = "OK"
+        except Exception as e:
+            fxts_result = "FAIL"
+
+        print(f"{device:4} {name:20} took {t1 - t0:.4f}s fx={fx_result:4} ts={ts_result:4} fxts={fxts_result:4}")
 
 
 if __name__ == '__main__':
