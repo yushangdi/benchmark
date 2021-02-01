@@ -37,14 +37,49 @@ def register_experiment(fn):
 
 
 class TracingAnalysis(object):
-    def __init__(self, mod: GraphModule):
+    """
+    `TracingAnalysis` is designed to be subclassed in order to build
+    FX analysis passes that operate by running an example input through
+    the graph and observing values along the way.
+
+    As an example, you could implement shape propagation via:
+
+        class ShapeProp(TracingAnalysis):
+            def store_result(self, node, result):
+                if isinstance(result, torch.Tensor):
+                    node.shape = result.shape
+                    node.dtype = result.dtype
+                super().store_result(node, result)
+
+        mod = torch.fx.symbolic_trace(...)
+        ShapeProp(mod).run(*example_input)
+        # nodes in mod now contain `.shape` and `.dtype`
+    """
+
+    def __init__(self, module: GraphModule):
+        """
+        Construct a `TracingAnalysis` object.
+
+        Args:
+
+            module (torch.fx.GraphModule): module to run analysis on.
+        """
         super(TracingAnalysis, self).__init__()
-        self.module: GraphModule = mod
+        self.module: GraphModule = module
         self.env: Dict[str, Any] = dict()
         self._named_modules: Dict[str, torch.Module] = dict()
         self._args_iter: Iterable = iter([])
 
     def run(self, *args: List[Any]) -> Any:
+        """
+        Run this analysis and execute self.module.
+
+        Args:
+            *args: Args to pass to self.module
+
+        Returns:
+            The return value of self.module
+        """
         self._args_iter = iter(args)
         self._named_modules: Dict[str, torch.Module] = dict(self.module.named_modules())
         try:
@@ -60,25 +95,61 @@ class TracingAnalysis(object):
             self.env.clear()
 
     def run_placeholder(self, node: Node) -> Any:
+        """
+        Execute a "placeholder" node in the graph.
+
+        Args:
+            node (torch.fx.node.Node): node the in graph current being run
+
+        Returns:
+            The next arg passed to the graph
+        """
         return next(self._args_iter)
 
     def run_get_attr(self, node: Node) -> Any:
+        """
+        Execute a "get_attr" node in the graph.
+
+        Args:
+            node (torch.fx.node.Node): node the in graph current being run
+
+        Returns:
+            The value of the loaded attribute
+        """
         target = node.target
         target_atoms = target.split('.')
         attr_itr = self.module
         for i, atom in enumerate(target_atoms):
             if not hasattr(attr_itr, atom):
-                raise RuntimeError(f"Node referenced nonexistant target {'.'.join(target_atoms[:i])}")
+                raise RuntimeError(f"Node referenced non-existant target {'.'.join(target_atoms[:i])}")
             attr_itr = getattr(attr_itr, atom)
         return attr_itr
 
     def run_call_function(self, node: Node) -> Any:
+        """
+        Execute a "call_function" node in the graph.
+
+        Args:
+            node (torch.fx.node.Node): node the in graph current being run
+
+        Returns:
+            The return value of the called function
+        """
         return self.run_call_any(node,
                                  node.target,
                                  self.load_args(node, node.args),
                                  self.load_args(node, node.kwargs))
 
     def run_call_method(self, node: Node) -> Any:
+        """
+        Execute a "call_method" node in the graph.
+
+        Args:
+            node (torch.fx.node.Node): node the in graph current being run
+
+        Returns:
+            The return value of the called method
+        """
         self_obj, *args = self.load_args(node, node.args)
         kwargs = self.load_args(node, node.kwargs)
         return self.run_call_any(node,
@@ -87,27 +158,94 @@ class TracingAnalysis(object):
                                  kwargs)
 
     def run_call_module(self, node: Node) -> Any:
+        """
+        Execute a "call_module" node in the graph.
+
+        Args:
+            node (torch.fx.node.Node): node the in graph current being run
+
+        Returns:
+            The return value of the called module
+        """
         return self.run_call_any(node,
                                  self._named_modules[node.target],
                                  self.load_args(node, node.args),
                                  self.load_args(node, node.kwargs))
 
-    def run_call_any(self, node: Node, callable: Callable, args: List[Any], kwargs: Dict[str, Any]) -> Any:
-        return callable(*args, **kwargs)
+    def run_call_any(self, node: Node, fn: Callable, args: List[Any], kwargs: Dict[str, Any]) -> Any:
+        """
+        Common hook used by "call_function", "call_method", and
+        "call_module" nodes in graph.  This is meant to be overridden
+        to add analysis around all call_* nodes.
+
+        Args:
+            node (torch.fx.node.Node): node the in graph current being run
+            fn (Callable): function, method, or module to call
+            args (List[Any]): *args to pass to callable
+            kwargs (Dict[str, Any]): **kwargs to pass to callable
+
+        Returns:
+            The return value of fn(*args, **kwargs)
+        """
+        return fn(*args, **kwargs)
 
     def run_output(self, node: Node) -> Any:
+        """
+        Execute a "output" node in the graph.
+
+        Args:
+            node (torch.fx.node.Node): node the in graph current being run
+
+        Returns:
+            The return value of the graph
+        """
         return self.load_args(node, node.args)[0]
 
     def load_args(self, node: Node, arg: Any) -> Any:
+        """
+        Load the args for node. `arg` will be either node.args
+        or node.kwargs and may be a nested data structure of
+        dict/list/tuple/slice.  Leaf nodes in that data structure are
+        pointers to other nodes in the graph.
+
+        Args:
+            node (torch.fx.node.Node): node the in graph current being run
+            arg (Any): args that should be loaded
+
+        Returns:
+            Loaded args
+        """
         return torch.fx.node.map_arg(arg, self.load)
 
     def load(self, node: Node):
+        """
+        Load the output value of a node that has previously been executed.
+
+        Args:
+            node (torch.fx.node.Node): node to read the output of
+
+        Returns:
+            the output value of node from `self.env`
+        """
         return self.env[node.name]
 
     def store_result(self, node: Node, result: Any):
+        """
+        This is run after executing each node and stores the output of
+        that node in `self.env`
+
+        Args:
+            node (torch.fx.node.Node): node the in graph current being run
+        """
         self.env[node.name] = result
 
     def before_node(self, node: Node):
+        """
+        Hook to allow custom code to be run before executing a node.
+
+        Args:
+            node (torch.fx.node.Node): node the in graph current being run
+        """
         pass
 
 
@@ -119,78 +257,85 @@ class ShapeProp(TracingAnalysis):
         super(ShapeProp, self).store_result(node, result)
 
 
-class BaseProfiler(TracingAnalysis):
-    @staticmethod
-    def nameof(callable: Callable):
-        return (getattr(callable, "__name__", None) or callable.__class__.__name__).lower()
+def nameof(fn: Callable):
+    return (getattr(fn, "__name__", None) or fn.__class__.__name__).lower()
 
-    def __init__(self, module: GraphModule):
-        super(BaseProfiler, self).__init__(module)
-        self.counts = Counter()
-        self.times = Counter()
 
-    @contextmanager
-    def timer(self, name):
-        t0 = time.perf_counter()
-        yield
+@contextmanager
+def timer(output: Counter, name: str):
+    start = time.perf_counter()
+    yield
+    try:
         torch.cuda.synchronize()
-        t1 = time.perf_counter()
-        self.times[name] += t1 - t0
-        self.counts[name] += 1
+    except Exception:
+        pass  # cuda might be disabled
+    output[name] += time.perf_counter() - start
 
 
-class FXProfiler(BaseProfiler):
-    def run_call_any(self, node: Node, callable: Callable, args: List[Any], kwargs: Dict[str, Any]) -> Any:
-        with self.timer(self.nameof(callable)):
-            return super(FXProfiler, self).run_call_any(node, callable, args, kwargs)
+class FXProfiler(TracingAnalysis):
+    def __init__(self, module: GraphModule):
+        super(FXProfiler, self).__init__(module)
+        # tracks how many seconds are spent in each function name
+        self.times: Dict[str, float] = Counter()
+
+    def run_call_any(self, node: Node, fn: Callable, args: List[Any], kwargs: Dict[str, Any]) -> Any:
+        # Called to run a "call_function", "call_method", or "call_module" node
+        with timer(self.times, nameof(fn)):
+            return super(FXProfiler, self).run_call_any(node, fn, args, kwargs)
 
     def run(self, *args: List[Any]) -> Any:
-        with self.timer("total"):
+        # We keep track of the grand total in a special "total" key
+        with timer(self.times, "total"):
             super(FXProfiler, self).run(*args)
 
-    def percentage(self):
+    def one_liner(self, n=8):
+        # generates a one-line report
         times = Counter(self.times)
         total = times.pop("total")
-        for key in times.keys():
-            times[key] /= total
-        return times
-
-    def one_liner(self, n=8):
         outputs = []
         other = 1.0
-        for k, v in self.percentage().most_common(n - 1):
+        for k, v in times.most_common(n - 1):
+            v = v / total
             outputs.append(f"{k}:{v:.0%}")
             other -= v
         outputs.append(f"other:{other:.0%}")
         return " ".join(outputs)
 
 
-class BigramCounter(BaseProfiler):
+class BigramCounter(TracingAnalysis):
     def __init__(self, module: GraphModule):
         super(BigramCounter, self).__init__(module)
+        # Keep track of what function names the inputs to this node came from
         self.current_node_reads: List[str] = []
+        # Shadow structure to self.env the stores the name of the function that wrote it
         self.env_sources: Dict[str, str] = dict()
+        # How many times we have seen each bigram
+        self.counts: Dict[str, int] = Counter()
 
     def before_node(self, node: Node):
+        # reset state at start of each node
         self.current_node_reads.clear()
+        return super(BigramCounter, self).before_node(node)
 
     def load(self, node: Node):
         try:
+            # record the function that wrote this input value
             self.current_node_reads.append(self.env_sources[node.name])
         except KeyError:
-            pass
+            pass  # from a placeholder or constant
+        # do original behavior
         return super(BigramCounter, self).load(node)
 
-    def run_call_any(self, node: Node, callable: Callable, args: List[Any], kwargs: Dict[str, Any]) -> Any:
-        name = self.nameof(callable)
-        with self.timer(f"{name}({','.join(self.current_node_reads)})"):
-            result = super(BigramCounter, self).run_call_any(node, callable, args, kwargs)
-        self.env_sources[node.name] = name
-        return result
+    def run_call_any(self, node: Node, fn: Callable, args: List[Any], kwargs: Dict[str, Any]) -> Any:
+        # count the bigram
+        self.counts[f"{nameof(fn)}({','.join(self.current_node_reads)})"] += 1
+        # tracking used to compute self.current_node_reads for the next node
+        self.env_sources[node.name] = nameof(fn)
+        return super(BigramCounter, self).run_call_any(node, fn, args, kwargs)
 
     def one_liner(self, n=8):
-        total = sum(self.counts.values())
-        return " ".join(f"{k}:{v/total:.0%}" for k, v in self.counts.most_common(n))
+        # generates a one-line report
+        return " ".join(f"{k}:{v}" for k, v in self.counts.most_common(n))
 
 
 @register_experiment
