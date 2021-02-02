@@ -9,6 +9,7 @@ from .demucs.parser import get_name, get_parser
 from .demucs.augment import FlipChannels, FlipSign, Remix, Shift
 from .demucs.utils import capture_init, center_trim
 
+
 torch.manual_seed(1337)
 random.seed(1337)
 np.random.seed(1337)
@@ -17,11 +18,10 @@ torch.backends.cudnn.benchmark = False
 
 
 class DemucsWrapper(torch.nn.Module):
-    def __init__(self, model, augment, device):
+    def __init__(self, model, augment):
         super(DemucsWrapper, self).__init__()
         self.model = model
         self.augment = augment
-        self.device = device
 
     def forward(self, streams):
         sources = streams[:, 1:]
@@ -57,13 +57,14 @@ class Model:
 
         if args.augment:
             self.augment = torch.nn.Sequential(FlipSign(), FlipChannels(), Shift(args.data_stride),
-                                               Remix(group_size=args.remix_group_size)).to(device)
+                                    Remix(group_size=args.remix_group_size)).to(device)
         else:
             self.augment = Shift(args.data_stride)
 
-        self.model = DemucsWrapper(self.model, self.augment, self.device)
+        self.model = DemucsWrapper(self.model, self.augment)
 
     def get_module(self):
+        self.model.eval()
         return self.model, self.example_inputs
 
     def eval(self, niter=1):
@@ -71,7 +72,6 @@ class Model:
         self.model.eval()
         for _ in range(niter):
             sources, estimates = self.model(*self.example_inputs)
-            # Should these be included in eval?
             sources = center_trim(sources, estimates)
             loss = self.criterion(estimates, sources)
 
