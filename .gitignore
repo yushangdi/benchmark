@@ -16,3 +16,5 @@ results.png
 results.txt
 train_batch0.jpg
 checkpoints
+*.csv
+.*

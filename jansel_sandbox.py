@@ -1,387 +1,248 @@
 #!/usr/bin/env python
-import inspect
-from collections import Counter
-from contextlib import contextmanager
+import os
 
+THREADS = int(os.environ.get("THREADS", -1))
+
+os.environ["FX_PATCH_GETITEM"] = "1"  # make BERT fx.symbolic_trace
+if THREADS > 0:
+    # Likely many of these are not needed...
+    os.environ["MKL_NUM_THREADS"] = "1"
+    os.environ["NUMEXPR_NUM_THREADS"] = "1"
+    os.environ["OMP_NUM_THREADS"] = "1"
+    os.environ["OPENBLAS_NUM_THREADS"] = "1"
+    os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
+
+from collections import Counter, defaultdict
+from contextlib import contextmanager
+from functools import wraps, partial
 from scipy.stats import gmean, ttest_ind
-from functools import partial
-from typing import Any, Dict, Iterable, Optional, List, Callable, Tuple
+from typing import Any, Dict, Callable, Optional
 import argparse
+import copy
 import gc
 import logging
 import numpy as np
-import os
+import pandas as pd
+import re
 import time
 import warnings
 
-os.environ["FX_PATCH_GETITEM"] = "1"  # make BERT fx.symbolic_trace
+from torchbenchmark import list_models
+from torch.fx import symbolic_trace, Node, GraphModule
+from torch.fx.interpreter import Interpreter
+import torch
 
-from torchbenchmark import list_models  # noqa: E402
-from torch.fx import symbolic_trace, Graph, GraphModule  # noqa: E402
-from torch.fx.node import Node
-import torch  # noqa: E402
+if THREADS > 0:
+    torch.set_num_threads(THREADS)
 
 log = logging.getLogger(__name__)
-EXPERIMENTS = [
-    ("fx()", lambda m, i: torch.fx.symbolic_trace(m)),
-    ("ts()", lambda m, i: torch.jit.script(m)),
-    ("ts(fx())", lambda m, i: torch.jit.script(torch.fx.symbolic_trace(m))),
-]
+EXPERIMENTS = []
 # These ones don't fx.symbolic_trace
 SKIP = {"attention_is_all_you_need_pytorch", "demucs", "dlrm", "maml", "yolov3"}
+register_experiment = EXPERIMENTS.append
+current_name = ""
 
 
-def register_experiment(fn):
-    EXPERIMENTS.append((fn.__name__, fn))
-    return fn
+class ProfileStats(object):
+    @staticmethod
+    def _norm(cnt: Counter):
+        """ Normalize to unit length """
+        total = sum(cnt.values())
+        return Counter({k: v / total for k, v in cnt.items()})
+
+    def __init__(self, get_name: Optional[Callable]):
+        super(ProfileStats, self).__init__()
+        self.times: Dict[str, float] = Counter()
+        self.counts: Dict[str, int] = Counter()
+        self.get_name = get_name
+
+    def record(self, node: Node, sec: float):
+        """ Record timings of a single call """
+        name = self.get_name(node)
+        self.times[name] += sec
+        self.counts[name] += 1
+
+    def summary(self, n=5):
+        def fmt(d):
+            most_common = self._norm(d).most_common(n - 1)
+            return " ".join([f"{k}:{v:.0%}" for k, v in most_common] +
+                            [f"other:{1.0 - sum(v for k, v in most_common):.0%}"])
+
+        return "\n".join([
+            "By time:  " + fmt(self.times),
+            # "By count: " + fmt(self.counts),
+        ])
 
 
-class TracingAnalysis(object):
-    """
-    `TracingAnalysis` is designed to be subclassed in order to build
-    FX analysis passes that operate by running an example input through
-    the graph and observing values along the way.
+class ProfileAggregate(ProfileStats):
+    def __init__(self, name: str):
+        super(ProfileAggregate, self).__init__(None)
+        self.df = pd.DataFrame()
+        self.name = name
 
-    As an example, you could implement shape propagation via:
+    def update(self, other: ProfileStats):
+        """ Merge stats from a finished benchmark run into this """
+        nt = self._norm(other.times).most_common(None)
+        self.times.update(nt)
+        self.counts.update(self._norm(other.counts))
+        self.df = self.df.append(pd.DataFrame(
+            [[t for n, t in nt]],
+            index=[current_name],
+            columns=[n for n, t in nt],
+        ))
 
-        class ShapeProp(TracingAnalysis):
-            def store_result(self, node, result):
-                if isinstance(result, torch.Tensor):
-                    node.shape = result.shape
-                    node.dtype = result.dtype
-                super().store_result(node, result)
-
-        mod = torch.fx.symbolic_trace(...)
-        ShapeProp(mod).run(*example_input)
-        # nodes in mod now contain `.shape` and `.dtype`
-    """
-
-    def __init__(self, module: GraphModule):
-        """
-        Construct a `TracingAnalysis` object.
-
-        Args:
-
-            module (torch.fx.GraphModule): module to run analysis on.
-        """
-        super(TracingAnalysis, self).__init__()
-        self.module: GraphModule = module
-        self.env: Dict[str, Any] = dict()
-        self._named_modules: Dict[str, torch.Module] = dict()
-        self._args_iter: Iterable = iter([])
-
-    def run(self, *args: List[Any]) -> Any:
-        """
-        Run this analysis and execute self.module.
-
-        Args:
-            *args: Args to pass to self.module
-
-        Returns:
-            The return value of self.module
-        """
-        self._args_iter = iter(args)
-        self._named_modules: Dict[str, torch.Module] = dict(self.module.named_modules())
-        try:
-            for node in self.module.graph.nodes:
-                self.before_node(node)
-                result = getattr(self, f"run_{node.op}")(node)
-                self.store_result(node, result)
-                if node.op == 'output':
-                    return result
-        finally:
-            self._args_iter = iter([])
-            self._named_modules.clear()
-            self.env.clear()
-
-    def run_placeholder(self, node: Node) -> Any:
-        """
-        Execute a "placeholder" node in the graph.
-
-        Args:
-            node (torch.fx.node.Node): node the in graph current being run
-
-        Returns:
-            The next arg passed to the graph
-        """
-        return next(self._args_iter)
-
-    def run_get_attr(self, node: Node) -> Any:
-        """
-        Execute a "get_attr" node in the graph.
-
-        Args:
-            node (torch.fx.node.Node): node the in graph current being run
-
-        Returns:
-            The value of the loaded attribute
-        """
-        target = node.target
-        target_atoms = target.split('.')
-        attr_itr = self.module
-        for i, atom in enumerate(target_atoms):
-            if not hasattr(attr_itr, atom):
-                raise RuntimeError(f"Node referenced non-existant target {'.'.join(target_atoms[:i])}")
-            attr_itr = getattr(attr_itr, atom)
-        return attr_itr
-
-    def run_call_function(self, node: Node) -> Any:
-        """
-        Execute a "call_function" node in the graph.
-
-        Args:
-            node (torch.fx.node.Node): node the in graph current being run
-
-        Returns:
-            The return value of the called function
-        """
-        return self.run_call_any(node,
-                                 node.target,
-                                 self.load_args(node, node.args),
-                                 self.load_args(node, node.kwargs))
-
-    def run_call_method(self, node: Node) -> Any:
-        """
-        Execute a "call_method" node in the graph.
-
-        Args:
-            node (torch.fx.node.Node): node the in graph current being run
-
-        Returns:
-            The return value of the called method
-        """
-        self_obj, *args = self.load_args(node, node.args)
-        kwargs = self.load_args(node, node.kwargs)
-        return self.run_call_any(node,
-                                 getattr(self_obj, node.target),
-                                 args,
-                                 kwargs)
-
-    def run_call_module(self, node: Node) -> Any:
-        """
-        Execute a "call_module" node in the graph.
-
-        Args:
-            node (torch.fx.node.Node): node the in graph current being run
-
-        Returns:
-            The return value of the called module
-        """
-        return self.run_call_any(node,
-                                 self._named_modules[node.target],
-                                 self.load_args(node, node.args),
-                                 self.load_args(node, node.kwargs))
-
-    def run_call_any(self, node: Node, fn: Callable, args: List[Any], kwargs: Dict[str, Any]) -> Any:
-        """
-        Common hook used by "call_function", "call_method", and
-        "call_module" nodes in graph.  This is meant to be overridden
-        to add analysis around all call_* nodes.
-
-        Args:
-            node (torch.fx.node.Node): node the in graph current being run
-            fn (Callable): function, method, or module to call
-            args (List[Any]): *args to pass to callable
-            kwargs (Dict[str, Any]): **kwargs to pass to callable
-
-        Returns:
-            The return value of fn(*args, **kwargs)
-        """
-        return fn(*args, **kwargs)
-
-    def run_output(self, node: Node) -> Any:
-        """
-        Execute a "output" node in the graph.
-
-        Args:
-            node (torch.fx.node.Node): node the in graph current being run
-
-        Returns:
-            The return value of the graph
-        """
-        return self.load_args(node, node.args)[0]
-
-    def load_args(self, node: Node, arg: Any) -> Any:
-        """
-        Load the args for node. `arg` will be either node.args
-        or node.kwargs and may be a nested data structure of
-        dict/list/tuple/slice.  Leaf nodes in that data structure are
-        pointers to other nodes in the graph.
-
-        Args:
-            node (torch.fx.node.Node): node the in graph current being run
-            arg (Any): args that should be loaded
-
-        Returns:
-            Loaded args
-        """
-        return torch.fx.node.map_arg(arg, self.load)
-
-    def load(self, node: Node):
-        """
-        Load the output value of a node that has previously been executed.
-
-        Args:
-            node (torch.fx.node.Node): node to read the output of
-
-        Returns:
-            the output value of node from `self.env`
-        """
-        return self.env[node.name]
-
-    def store_result(self, node: Node, result: Any):
-        """
-        This is run after executing each node and stores the output of
-        that node in `self.env`
-
-        Args:
-            node (torch.fx.node.Node): node the in graph current being run
-        """
-        self.env[node.name] = result
-
-    def before_node(self, node: Node):
-        """
-        Hook to allow custom code to be run before executing a node.
-
-        Args:
-            node (torch.fx.node.Node): node the in graph current being run
-        """
-        pass
+    def save(self):
+        df = self.df.fillna(0.0).transpose()
+        df.insert(0, "AVERAGE", df.mean(axis=1))
+        df.sort_values("AVERAGE", ascending=False, inplace=True)
+        df.to_csv(f"{self.name}.csv")
+        print(f"wrote {self.name}.csv")
 
 
-class ShapeProp(TracingAnalysis):
-    def store_result(self, node, result):
-        if isinstance(result, torch.Tensor):
-            node.shape = result.shape
-            node.dtype = result.dtype
-        super(ShapeProp, self).store_result(node, result)
+PROFILES = [
+    ProfileAggregate("operators"),
+    ProfileAggregate("successors1"),
+    ProfileAggregate("successors2"),
+    ProfileAggregate("predecessors1"),
+    ProfileAggregate("predecessors2"),
+]
 
 
-def nameof(fn: Callable):
-    return (getattr(fn, "__name__", None) or fn.__class__.__name__).lower()
-
-
-class FXProfiler(TracingAnalysis):
-    """
-    An example showing how to write a simple profiler analysis pass in FX.
-
-    See also PyTorch profiler:
-        https://pytorch.org/tutorials/recipes/recipes/profiler.html
-
-    Example usage:
-        mod = torch.fx.symbolic_trace(...)
-        prof = FXProfiler(mod)
-        prof.run(*example_input)
-        print(prof.summary())
-
-    Example output:
-       conv2d:49% linear:28% pixelshuffle:10% relu:7% sub:2% sigmoid:2% view:0% other:2%
-    """
+class FXProfiler(Interpreter):
     def __init__(self, module: GraphModule):
         super(FXProfiler, self).__init__(module)
-        # tracks how many seconds are spent in each function name
-        self.times: Dict[str, float] = Counter()
-        self.total = 0.0
+        self.profile_stats = [
+            ProfileStats(self.name),
+            ProfileStats(partial(self.succ_name, depth=2)),
+            ProfileStats(partial(self.succ_name, depth=3)),
+            ProfileStats(partial(self.pred_name, depth=2)),
+            ProfileStats(partial(self.pred_name, depth=3)),
+        ]
 
-    def run_call_any(self, node: Node, fn: Callable, args: List[Any], kwargs: Dict[str, Any]) -> Any:
-        # Called to run a "call_function", "call_method", or "call_module" node
+        self.successors = defaultdict(list)
+        self.predecessors = defaultdict(list)
+        for node in self.module.graph.nodes:
+            def visit(other_node):
+                self.successors[other_node].append(node)
+                self.predecessors[node].append(other_node)
+
+            torch.fx.map_arg((node.args, node.kwargs), visit)
+
+    _op_node_to_name = {
+        "call_function": lambda i, t: t.__name__,
+        "call_method": lambda i, t: t,
+        "call_module": lambda i, t: type(i.fetch_attr(t)).__name__,
+        "get_attr": lambda i, t: "get_attr",
+        "output": lambda i, t: "output",
+        "placeholder": lambda i, t: "placeholder",
+    }
+
+    def name(self, n: Node) -> Callable:
+        """ Coverts a Node to a string name """
+        return self._op_node_to_name[n.op](self, n.target).lower()
+
+    def pred_name(self, node: Node, depth: int) -> Callable:
+        """ A string name that includes names of predecessor nodes """
+        if depth <= 1:
+            return self.name(node)
+        pred_str = ','.join(self.pred_name(x, depth - 1) for x in self.predecessors[node])
+        return f"{self.name(node)}({pred_str})"
+
+    def succ_name(self, node: Node, depth: int) -> Callable:
+        """ A string name that includes names of successor nodes """
+        if depth <= 1:
+            return self.name(node)
+        s = self.successors[node]
+        if len(s) == 0:
+            return self.name(node)
+        elif len(s) > 1:
+            succ_str = "MANY"
+        else:
+            succ_str = self.succ_name(s[0], depth - 1)
+        return f"{self.name(node)}->{succ_str}"
+
+    def run_node(self, n: Node) -> Any:
+        """ Timing wrapper around executing a node """
         start = time.perf_counter()
-        result = super(FXProfiler, self).run_call_any(node, fn, args, kwargs)
-        # consider calling `torch.cuda.synchronize()` here
-        self.times[nameof(fn)] += time.perf_counter() - start
+        result = super().run_node(n)
+        # torch.cuda.synchronize()
+        sec = time.perf_counter() - start
+        for prof in self.profile_stats:
+            prof.record(n, sec)
         return result
 
-    def run(self, *args: List[Any]) -> Any:
-        start = time.perf_counter()
-        result = super(FXProfiler, self).run(*args)
-        self.total += time.perf_counter() - start
-        return result
 
-    def summary(self, n=8):
-        # generates a one-line report
-        outputs = []
-        other = 1.0
-        for k, v in self.times.most_common(n - 1):
-            v = v / self.total
-            outputs.append(f"{k}:{v:.0%}")
-            other -= v
-        outputs.append(f"other:{other:.0%}")
-        return " ".join(outputs)
+@contextmanager
+def enable_cpu_fusion():
+    torch._C._jit_override_can_fuse_on_cpu(True)
+    yield
+    torch._C._jit_override_can_fuse_on_cpu(False)
 
 
-class BigramCounter(TracingAnalysis):
-    """
-    An example showing an analysis pass in FX that looks at sliding
-    windows of an op and its direct inputs and counts frequencies.
+def run_with_cpu_fusion(fn):
+    @wraps(fn)
+    def run(*args):
+        with enable_cpu_fusion():
+            return fn(*args)
 
-    Example usage:
-        mod = torch.fx.symbolic_trace(...)
-        prof = BigramCounter(mod)
-        prof.run(*example_input)
-        print(prof.summary(4))
-
-    Example output:
-        batchnorm2d(conv2d):53 conv2d(relu):50 relu(batchnorm2d):33 relu(add):16
-    """
-
-    def __init__(self, module: GraphModule):
-        super(BigramCounter, self).__init__(module)
-        # Keep track of what function names the inputs to this node came from
-        self.current_node_sources: List[str] = []
-        # Shadow structure to self.env the stores the name of the function that wrote it
-        self.env_sources: Dict[str, str] = dict()
-        # How many times we have seen each bigram
-        self.counts: Dict[str, int] = Counter()
-
-    def before_node(self, node: Node):
-        # reset state at start of each node
-        self.current_node_sources.clear()
-        return super(BigramCounter, self).before_node(node)
-
-    def load(self, node: Node):
-        try:
-            # record the function that wrote this input value
-            self.current_node_sources.append(self.env_sources[node.name])
-        except KeyError:
-            pass  # from a placeholder or constant
-        # do original behavior
-        return super(BigramCounter, self).load(node)
-
-    def run_call_any(self, node: Node, fn: Callable, args: List[Any], kwargs: Dict[str, Any]) -> Any:
-        # count the bigram
-        self.counts[f"{nameof(fn)}({','.join(self.current_node_sources)})"] += 1
-        # tracking used to compute self.current_node_sources for the next node
-        self.env_sources[node.name] = nameof(fn)
-        return super(BigramCounter, self).run_call_any(node, fn, args, kwargs)
-
-    def summary(self, n=8):
-        # generates a one-line report
-        return " ".join(f"{k}:{v}" for k, v in self.counts.most_common(n))
+    return run
 
 
 @register_experiment
-def shape_prop(model, example_inputs):
-    model = torch.fx.symbolic_trace(model)
-    ShapeProp(model).run(*example_inputs)
-    return model
-
-
-@register_experiment
-def time_profile(model, example_inputs):
+def profile(model, example_inputs):
     model = torch.fx.symbolic_trace(model)
     prof = FXProfiler(model)
     prof.run(*example_inputs)
-    print(prof.summary())
+    for aggregate, stats in zip(PROFILES, prof.profile_stats):
+        print(aggregate.name, stats.summary())
+        aggregate.update(stats)
     return model
 
 
 @register_experiment
-def bigram_profile(model, example_inputs):
-    model = torch.fx.symbolic_trace(model)
-    prof = BigramCounter(model)
-    prof.run(*example_inputs)
-    print(prof.summary())
+def eager(model, example_inputs):
     return model
+
+
+@register_experiment
+def fx_eager(model, example_inputs):
+    return torch.fx.symbolic_trace(model)
+
+
+@register_experiment
+def ts(model, example_inputs):
+    return torch.jit.script(model)
+
+
+@register_experiment
+def fx_ts(model, example_inputs):
+    return torch.jit.script(symbolic_trace(model))
+
+
+@register_experiment
+def fx_ts_fusion(model, example_inputs):
+    assert THREADS == 1  # so I don't forget
+    with enable_cpu_fusion():
+        return run_with_cpu_fusion(torch.jit.script(symbolic_trace(model)))
+
+
+@register_experiment
+def ts_fusion(model, example_inputs):
+    assert THREADS == 1  # so I don't forget
+    with enable_cpu_fusion():
+        return run_with_cpu_fusion(torch.jit.script(model))
+
+
+@register_experiment
+def fx_ts_freezing(model, example_inputs):
+    return torch.jit.freeze(torch.jit.script(symbolic_trace(model)))
+
+
+@register_experiment
+def fx_ts_freezing_fusion(model, example_inputs):
+    assert THREADS == 1
+    with enable_cpu_fusion():
+        return run_with_cpu_fusion(torch.jit.freeze(torch.jit.script(symbolic_trace(model))))
 
 
 def short_name(name, limit=20):
@@ -401,18 +262,11 @@ def same(a, b):
         raise RuntimeError(f"unsupported type: {type(a).__name__}")
 
 
-def matches(needles, haystack):
-    if not needles:
-        return True
-    for needle in needles:
-        if needle in haystack:
-            return True
-    return False
-
-
 def iter_models(args):
     for benchmark_cls in list_models():
-        if not matches(args.filter, benchmark_cls.name) or benchmark_cls.name in SKIP:
+        if (not re.search("|".join(args.filter), benchmark_cls.name, re.I) or
+                re.search("|".join(args.exclude), benchmark_cls.name, re.I) or
+                benchmark_cls.name in SKIP):
             continue
         for device in args.devices:
             try:
@@ -420,7 +274,9 @@ def iter_models(args):
                 model, example_inputs = benchmark.get_module()
                 model.eval()
                 gc.collect()
-                yield device, short_name(benchmark.name), model, example_inputs
+                global current_name
+                current_name = short_name(benchmark.name)
+                yield device, current_name, model, example_inputs
             except NotImplementedError:
                 pass
 
@@ -450,13 +306,15 @@ def measure_speedups(models, example_inputs, times, repeat):
 
 
 class ExperimentResult(object):
+    pvalue_threshold = 0.1
+
     def __init__(self, model, ok):
         self.model = model
         self.ok = ok
 
     def format_speedup(self, speedup, pvalue):
         if self.ok == "OK":
-            if pvalue > 0.1:
+            if pvalue > self.pvalue_threshold:
                 return f"{speedup:.3f}x SAME"
             return f"{speedup:.3f}x p={pvalue:.2f}"
         return self.ok
@@ -477,8 +335,12 @@ def fx_tweaks():
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--experiment", "-e", action="append",
-                        help="filter experiments")
+                        help="experiment to run")
+    parser.add_argument("--baseline", "-b", default="eager",
+                        help="baseline to normalize to")
     parser.add_argument("--filter", "-k", action="append",
+                        help="filter benchmarks")
+    parser.add_argument("--exclude", "-x", action="append",
                         help="filter benchmarks")
     parser.add_argument("--devices", "-d", action="append",
                         help="cpu or cuda")
@@ -488,27 +350,36 @@ def main():
                         help="number of timing runs")
     parser.add_argument("--min-measure-sec", type=float, default=0.1,
                         help="floor of how long a timing run can take (introduces multiple calls to hit this)")
-    parser.add_argument("--verbose", "-v", action="store_true")
-    parser.add_argument("--disable-skip", action="store_true")
+    parser.add_argument("--verbose", "-v", action="store_true",
+                        help="show errors")
+    parser.add_argument("--no-skip", action="store_true",
+                        help="run models that don't fx cleanly")
     args = parser.parse_args()
+
+    # defaults
     args.devices = args.devices or ["cpu"]
+    args.filter = args.filter or [r"."]
+    args.exclude = args.exclude or [r"^$"]
+    args.no_skip and SKIP.clear()
 
-    if args.experiment:
-        global EXPERIMENTS
-        EXPERIMENTS = [(name, fn) for name, fn in EXPERIMENTS
-                       if matches(args.experiment, name)]
-        assert EXPERIMENTS
-
-    if args.disable_skip:
-        SKIP.clear()
+    named_fns = {fn.__name__: fn for fn in EXPERIMENTS}
+    baseline = named_fns[args.baseline]
+    try:
+        assert args.experiment
+        experiment_fns = [named_fns[x] for x in args.experiment]
+    except (KeyError, AssertionError):
+        print(f"--experiment=<NAME> must be one of:\n" +
+              "\n".join(x.__name__ for x in EXPERIMENTS))
+        return
 
     all_speedups = []
-    print_row("dev", "name", [name for name, _ in EXPERIMENTS])
+    print(f"median speedup over {baseline.__name__} and t-test")
+    print_row("dev", "name", [x.__name__ for x in experiment_fns])
 
     def check_correctness(fn):
         torch.manual_seed(1337)
         try:
-            alt_model = fn(model, example_inputs)
+            alt_model = fn(copy.deepcopy(original_model), example_inputs)
             if same(result, alt_model(*example_inputs)):
                 return alt_model, "OK"
             return None, "INCORRECT"
@@ -517,10 +388,11 @@ def main():
                 log.exception("error running fn.__name__")
             return None, "ERROR"  # f"{type(e).__name__}: {str(e)[:40]}"
 
-    for device, name, model, example_inputs in iter_models(args):
+    for device, name, original_model, example_inputs in iter_models(args):
+        model = baseline(copy.deepcopy(original_model), example_inputs)
         result, sec = timed(model, example_inputs, args.warmup)
         experiments = []
-        for _, fn in EXPERIMENTS:
+        for fn in experiment_fns:
             fn_model, fn_ok = check_correctness(fn)
             experiments.append(ExperimentResult(fn_model, fn_ok))
 
@@ -536,6 +408,10 @@ def main():
                    for e, s, p in zip(experiments, speedups, pvalues)])
 
     print_row("", "GEOMEAN", map("{:.3f}x".format, gmean(np.vstack(all_speedups), axis=0)))
+
+    for prof in PROFILES:
+        print(prof.name, prof.summary(10))
+        prof.save()
 
 
 if __name__ == '__main__':
