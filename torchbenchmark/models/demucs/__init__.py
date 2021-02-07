@@ -17,7 +17,6 @@ np.random.seed(1337)
 torch.backends.cudnn.deterministic = True
 torch.backends.cudnn.benchmark = False
 
-<<<<<<< HEAD
 
 class DemucsWrapper(torch.nn.Module):
     def __init__(self, model, augment):
@@ -32,10 +31,7 @@ class DemucsWrapper(torch.nn.Module):
         return sources, self.model(mix)
 
 
-class Model:
-=======
 class Model(BenchmarkModel):
->>>>>>> f4ee4317c0db94dd3f0e4cb1652ad2c32987157f
     def __init__(self, device=None, jit=False):
         super().__init__()
         self.device = device
@@ -67,12 +63,10 @@ class Model(BenchmarkModel):
         else:
             self.augment = Shift(args.data_stride)
 
-<<<<<<< HEAD
         self.model = DemucsWrapper(self.model, self.augment)
-=======
+
     def _set_mode(self, train):
         self.model.train(train)
->>>>>>> f4ee4317c0db94dd3f0e4cb1652ad2c32987157f
 
     def get_module(self):
         self.model.eval()
