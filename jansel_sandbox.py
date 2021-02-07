@@ -106,7 +106,7 @@ class FXProfiler(Interpreter):
     def __init__(self, module: GraphModule):
         super(FXProfiler, self).__init__(module)
         self.profile_stats = [
-            ProfileStats(self.name),
+            ProfileStats(self.get_name),
             ProfileStats(partial(self.succ_name, depth=2)),
             ProfileStats(partial(self.succ_name, depth=3)),
             ProfileStats(partial(self.pred_name, depth=2)),
@@ -148,22 +148,20 @@ class FXProfiler(Interpreter):
     def pred_name(self, node: Node, depth: int) -> Callable:
         """ A string name that includes names of predecessor nodes """
         if depth <= 1:
-            return self.name(node)
+            return self.get_name(node)
         pred_str = ','.join(self.pred_name(x, depth - 1) for x in self.predecessors[node])
-        return f"{self.name(node)}({pred_str})"
+        return f"{self.get_name(node)}({pred_str})"
 
     def succ_name(self, node: Node, depth: int) -> Callable:
         """ A string name that includes names of successor nodes """
-        if depth <= 1:
-            return self.name(node)
         s = self.successors[node]
-        if len(s) == 0:
-            return self.name(node)
+        if depth <= 1 or len(s) == 0:
+            return self.get_name(node)
         elif len(s) > 1:
             succ_str = "MANY"
         else:
             succ_str = self.succ_name(s[0], depth - 1)
-        return f"{self.name(node)}->{succ_str}"
+        return f"{self.get_name(node)}->{succ_str}"
 
 
 @register_experiment
