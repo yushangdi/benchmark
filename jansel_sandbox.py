@@ -63,15 +63,9 @@ class ProfileStats(object):
         self.counts[name] += 1
 
     def summary(self, n=5):
-        def fmt(d):
-            most_common = self._norm(d).most_common(n - 1)
-            return " ".join([f"{k}:{v:.0%}" for k, v in most_common] +
-                            [f"other:{1.0 - sum(v for k, v in most_common):.0%}"])
-
-        return "\n".join([
-            "By time:  " + fmt(self.times),
-            # "By count: " + fmt(self.counts),
-        ])
+        most_common = self._norm(self.times).most_common(n - 1)
+        return " ".join([f"{k}:{v:.0%}" for k, v in most_common] +
+                        [f"other:{1.0 - sum(v for k, v in most_common):.0%}"])
 
 
 class ProfileAggregate(ProfileStats):
@@ -128,6 +122,16 @@ class FXProfiler(Interpreter):
 
             torch.fx.map_arg((node.args, node.kwargs), visit)
 
+    def run_node(self, n: Node) -> Any:
+        """ Timing wrapper around executing an FX Node """
+        start = time.perf_counter()
+        result = super().run_node(n)
+        torch.cuda.synchronize()
+        sec = time.perf_counter() - start
+        for prof in self.profile_stats:
+            prof.record(n, sec)
+        return result
+
     _op_node_to_name = {
         "call_function": lambda i, t: t.__name__,
         "call_method": lambda i, t: t,
@@ -160,32 +164,6 @@ class FXProfiler(Interpreter):
         else:
             succ_str = self.succ_name(s[0], depth - 1)
         return f"{self.name(node)}->{succ_str}"
-
-    def run_node(self, n: Node) -> Any:
-        """ Timing wrapper around executing a node """
-        start = time.perf_counter()
-        result = super().run_node(n)
-        # torch.cuda.synchronize()
-        sec = time.perf_counter() - start
-        for prof in self.profile_stats:
-            prof.record(n, sec)
-        return result
-
-
-@contextmanager
-def enable_cpu_fusion():
-    torch._C._jit_override_can_fuse_on_cpu(True)
-    yield
-    torch._C._jit_override_can_fuse_on_cpu(False)
-
-
-def run_with_cpu_fusion(fn):
-    @wraps(fn)
-    def run(*args):
-        with enable_cpu_fusion():
-            return fn(*args)
-
-    return run
 
 
 @register_experiment
@@ -220,29 +198,8 @@ def fx_ts(model, example_inputs):
 
 
 @register_experiment
-def fx_ts_fusion(model, example_inputs):
-    assert THREADS == 1  # so I don't forget
-    with enable_cpu_fusion():
-        return run_with_cpu_fusion(torch.jit.script(symbolic_trace(model)))
-
-
-@register_experiment
-def ts_fusion(model, example_inputs):
-    assert THREADS == 1  # so I don't forget
-    with enable_cpu_fusion():
-        return run_with_cpu_fusion(torch.jit.script(model))
-
-
-@register_experiment
 def fx_ts_freezing(model, example_inputs):
     return torch.jit.freeze(torch.jit.script(symbolic_trace(model)))
-
-
-@register_experiment
-def fx_ts_freezing_fusion(model, example_inputs):
-    assert THREADS == 1
-    with enable_cpu_fusion():
-        return run_with_cpu_fusion(torch.jit.freeze(torch.jit.script(symbolic_trace(model))))
 
 
 def short_name(name, limit=20):
@@ -350,6 +307,8 @@ def main():
                         help="number of timing runs")
     parser.add_argument("--min-measure-sec", type=float, default=0.1,
                         help="floor of how long a timing run can take (introduces multiple calls to hit this)")
+    parser.add_argument("--cpu-fusion", action="store_true",
+                        help="enable can_fuse_on_cpu")
     parser.add_argument("--verbose", "-v", action="store_true",
                         help="show errors")
     parser.add_argument("--no-skip", action="store_true",
@@ -357,10 +316,13 @@ def main():
     args = parser.parse_args()
 
     # defaults
+    args.experiment = args.experiment or ["profile"]
     args.devices = args.devices or ["cpu"]
     args.filter = args.filter or [r"."]
     args.exclude = args.exclude or [r"^$"]
     args.no_skip and SKIP.clear()
+    if args.cpu_fusion:
+        torch._C._jit_override_can_fuse_on_cpu(True)
 
     named_fns = {fn.__name__: fn for fn in EXPERIMENTS}
     baseline = named_fns[args.baseline]
