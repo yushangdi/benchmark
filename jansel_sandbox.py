@@ -38,7 +38,8 @@ if THREADS > 0:
 log = logging.getLogger(__name__)
 EXPERIMENTS = []
 # These ones don't fx.symbolic_trace
-SKIP = {"attention_is_all_you_need_pytorch", "demucs", "dlrm", "maml", "yolov3"}
+SKIP = {"attention_is_all_you_need_pytorch", "demucs", "dlrm", "maml",
+        "yolov3", "tacotron2", "moco", "Super_SloMo"}
 register_experiment = EXPERIMENTS.append
 current_name = ""
 
@@ -141,7 +142,7 @@ class FXProfiler(Interpreter):
         "placeholder": lambda i, t: "placeholder",
     }
 
-    def name(self, n: Node) -> Callable:
+    def get_name(self, n: Node) -> Callable:
         """ Coverts a Node to a string name """
         return self._op_node_to_name[n.op](self, n.target).lower()
 
