@@ -172,7 +172,7 @@ def profile(model, example_inputs):
     prof = FXProfiler(model)
     prof.run(*example_inputs)
     for aggregate, stats in zip(PROFILES, prof.profile_stats):
-        print(aggregate.name, stats.summary())
+        # print(aggregate.name, stats.summary())
         aggregate.update(stats)
     return model
 
