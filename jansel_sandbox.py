@@ -1,39 +1,20 @@
 #!/usr/bin/env python
-import os
-
-THREADS = int(os.environ.get("THREADS", -1))
-
-os.environ["FX_PATCH_GETITEM"] = "1"  # make BERT fx.symbolic_trace
-if THREADS > 0:
-    # Likely many of these are not needed...
-    os.environ["MKL_NUM_THREADS"] = "1"
-    os.environ["NUMEXPR_NUM_THREADS"] = "1"
-    os.environ["OMP_NUM_THREADS"] = "1"
-    os.environ["OPENBLAS_NUM_THREADS"] = "1"
-    os.environ["VECLIB_MAXIMUM_THREADS"] = "1"
-
-from collections import Counter, defaultdict
-from contextlib import contextmanager
-from functools import wraps, partial
 from scipy.stats import gmean, ttest_ind
-from typing import Any, Dict, Callable, Optional
 import argparse
 import copy
 import gc
 import logging
 import numpy as np
-import pandas as pd
+import os
 import re
 import time
 import warnings
 
-from torchbenchmark import list_models
-from torch.fx import symbolic_trace, Node, GraphModule
-from torch.fx.interpreter import Interpreter
-import torch
+os.environ["FX_PATCH_GETITEM"] = "1"  # make BERT fx.symbolic_trace
 
-if THREADS > 0:
-    torch.set_num_threads(THREADS)
+from torchbenchmark import list_models
+from torch.fx import symbolic_trace
+import torch
 
 log = logging.getLogger(__name__)
 EXPERIMENTS = []
@@ -42,138 +23,6 @@ SKIP = {"attention_is_all_you_need_pytorch", "demucs", "dlrm", "maml",
         "yolov3", "tacotron2", "moco", "Super_SloMo"}
 register_experiment = EXPERIMENTS.append
 current_name = ""
-
-
-class ProfileStats(object):
-    @staticmethod
-    def _norm(cnt: Counter):
-        """ Normalize to unit length """
-        total = sum(cnt.values())
-        return Counter({k: v / total for k, v in cnt.items()})
-
-    def __init__(self, get_name: Optional[Callable]):
-        super(ProfileStats, self).__init__()
-        self.times: Dict[str, float] = Counter()
-        self.counts: Dict[str, int] = Counter()
-        self.get_name = get_name
-
-    def record(self, node: Node, sec: float):
-        """ Record timings of a single call """
-        name = self.get_name(node)
-        self.times[name] += sec
-        self.counts[name] += 1
-
-    def summary(self, n=5):
-        most_common = self._norm(self.times).most_common(n - 1)
-        return " ".join([f"{k}:{v:.0%}" for k, v in most_common] +
-                        [f"other:{1.0 - sum(v for k, v in most_common):.0%}"])
-
-
-class ProfileAggregate(ProfileStats):
-    def __init__(self, name: str):
-        super(ProfileAggregate, self).__init__(None)
-        self.df = pd.DataFrame()
-        self.name = name
-
-    def update(self, other: ProfileStats):
-        """ Merge stats from a finished benchmark run into this """
-        nt = self._norm(other.times).most_common(None)
-        self.times.update(nt)
-        self.counts.update(self._norm(other.counts))
-        self.df = self.df.append(pd.DataFrame(
-            [[t for n, t in nt]],
-            index=[current_name],
-            columns=[n for n, t in nt],
-        ))
-
-    def save(self):
-        df = self.df.fillna(0.0).transpose()
-        df.insert(0, "AVERAGE", df.mean(axis=1))
-        df.sort_values("AVERAGE", ascending=False, inplace=True)
-        df.to_csv(f"{self.name}.csv")
-        print(f"wrote {self.name}.csv")
-
-
-PROFILES = [
-    ProfileAggregate("operators"),
-    ProfileAggregate("successors1"),
-    ProfileAggregate("successors2"),
-    ProfileAggregate("predecessors1"),
-    ProfileAggregate("predecessors2"),
-]
-
-
-class FXProfiler(Interpreter):
-    def __init__(self, module: GraphModule):
-        super(FXProfiler, self).__init__(module)
-        self.profile_stats = [
-            ProfileStats(self.get_name),
-            ProfileStats(partial(self.succ_name, depth=2)),
-            ProfileStats(partial(self.succ_name, depth=3)),
-            ProfileStats(partial(self.pred_name, depth=2)),
-            ProfileStats(partial(self.pred_name, depth=3)),
-        ]
-
-        self.successors = defaultdict(list)
-        self.predecessors = defaultdict(list)
-        for node in self.module.graph.nodes:
-            def visit(other_node):
-                self.successors[other_node].append(node)
-                self.predecessors[node].append(other_node)
-
-            torch.fx.map_arg((node.args, node.kwargs), visit)
-
-    def run_node(self, n: Node) -> Any:
-        """ Timing wrapper around executing an FX Node """
-        start = time.perf_counter()
-        result = super().run_node(n)
-        torch.cuda.synchronize()
-        sec = time.perf_counter() - start
-        for prof in self.profile_stats:
-            prof.record(n, sec)
-        return result
-
-    _op_node_to_name = {
-        "call_function": lambda i, t: t.__name__,
-        "call_method": lambda i, t: t,
-        "call_module": lambda i, t: type(i.fetch_attr(t)).__name__,
-        "get_attr": lambda i, t: "get_attr",
-        "output": lambda i, t: "output",
-        "placeholder": lambda i, t: "placeholder",
-    }
-
-    def get_name(self, n: Node) -> Callable:
-        """ Coverts a Node to a string name """
-        return self._op_node_to_name[n.op](self, n.target).lower()
-
-    def pred_name(self, node: Node, depth: int) -> Callable:
-        """ A string name that includes names of predecessor nodes """
-        if depth <= 1:
-            return self.get_name(node)
-        pred_str = ','.join(self.pred_name(x, depth - 1) for x in self.predecessors[node])
-        return f"{self.get_name(node)}({pred_str})"
-
-    def succ_name(self, node: Node, depth: int) -> Callable:
-        """ A string name that includes names of successor nodes """
-        s = self.successors[node]
-        if depth <= 1 or len(s) == 0:
-            return self.get_name(node)
-        elif len(s) > 1:
-            succ_str = "MANY"
-        else:
-            succ_str = self.succ_name(s[0], depth - 1)
-        return f"{self.get_name(node)}->{succ_str}"
-
-
-@register_experiment
-def profile(model, example_inputs):
-    model = torch.fx.symbolic_trace(model)
-    prof = FXProfiler(model)
-    prof.run(*example_inputs)
-    for aggregate, stats in zip(PROFILES, prof.profile_stats):
-        # print(aggregate.name, stats.summary())
-        aggregate.update(stats)
-    return model
 
 
 @register_experiment
@@ -189,6 +38,11 @@ def fx_eager(model, example_inputs):
 @register_experiment
 def ts(model, example_inputs):
     return torch.jit.script(model)
+
+
+@register_experiment
+def ts_freezing(model, example_inputs):
+    return torch.jit.freeze(torch.jit.script(model))
 
 
 @register_experiment
@@ -304,6 +158,8 @@ def main():
                         help="warmup runs to do")
     parser.add_argument("--repeat", "-n", type=int, default=30,
                         help="number of timing runs")
+    parser.add_argument("--threads", "-t", type=int,
+                        help="number of threads to use")
     parser.add_argument("--min-measure-sec", type=float, default=0.1,
                         help="floor of how long a timing run can take (introduces multiple calls to hit this)")
     parser.add_argument("--cpu-fusion", action="store_true",
@@ -315,13 +171,19 @@ def main():
     args = parser.parse_args()
 
     # defaults
-    args.experiment = args.experiment or ["profile"]
+    args.experiment = args.experiment or ["ts"]
     args.devices = args.devices or ["cpu"]
     args.filter = args.filter or [r"."]
     args.exclude = args.exclude or [r"^$"]
-    args.no_skip and SKIP.clear()
+
+    if args.no_skip:
+        SKIP.clear()
+
     if args.cpu_fusion:
         torch._C._jit_override_can_fuse_on_cpu(True)
+
+    if args.threads:
+        torch.set_num_threads(args.threads)
 
     named_fns = {fn.__name__: fn for fn in EXPERIMENTS}
     baseline = named_fns[args.baseline]
@@ -370,12 +232,41 @@ def main():
 
     print_row("", "GEOMEAN", map("{:.3f}x".format, gmean(np.vstack(all_speedups), axis=0)))
 
-    for prof in PROFILES:
-        print(prof.name, prof.summary(10))
-        prof.save()
+
+import torch, re, multiprocessing
+from timeit import timeit
+from torchbenchmark.models import LearningToPaint, pytorch_mobilenet_v3
+
+
+def measure(fuse, benchmark_module, warmup=1, number=100):
+    torch.set_num_threads(1)
+    torch._C._jit_override_can_fuse_on_cpu(fuse)
+    name = re.sub(r"^.*[.]", "", benchmark_module.__name__)
+    benchmark = benchmark_module.Model(device="cpu", jit=True)
+    model, example_inputs = benchmark.get_module()
+    assert isinstance(model, torch.jit.ScriptModule)
+
+    model = model.eval()
+    timeit(lambda: model(*example_inputs), number=warmup)
+    print(f"    script({name:20})         = {timeit(lambda: model(*example_inputs), number=number):.3f} sec")
+
+    model = torch.jit.freeze(model)
+    timeit(lambda: model(*example_inputs), number=warmup)
+    print(f"    freeze(script({name:20})) = {timeit(lambda: model(*example_inputs), number=number):.3f} sec")
+
+
+def repro():
+    for fuse in (False, True):
+        print(f"_jit_override_can_fuse_on_cpu({fuse}):")
+        for benchmark_module in (LearningToPaint, pytorch_mobilenet_v3):
+            # Doing a subproc to ensure we aren't running cached code
+            p = multiprocessing.Process(target=measure, args=(fuse, benchmark_module))
+            p.start()
+            p.join()
 
 
 if __name__ == '__main__':
     logging.basicConfig(level=logging.WARNING)
     warnings.filterwarnings("ignore")
-    main()
+    # main()
+    repro()
