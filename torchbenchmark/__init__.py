@@ -88,11 +88,10 @@ def list_models():
     models = []
     for model_path in _list_model_paths():
         model_name = os.path.basename(model_path)
-        try:
-            module = importlib.import_module(f'.models.{model_name}', package=__name__)
-        except Exception as e:
-            log.warning(f"Failed to import {model_name} -- {type(e).__name__}: {str(e)}")
-
+        module = importlib.import_module(f'.models.{model_name}', package=__name__)
+        if not hasattr(module, 'Model'):
+            print(f"Warning: {module} does not define attribute Model, skip it")
+            continue
         Model = getattr(module, 'Model')
         if not hasattr(Model, 'name'):
             Model.name = model_name
