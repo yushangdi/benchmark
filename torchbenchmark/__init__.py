@@ -5,7 +5,6 @@ import sys
 import torch
 from urllib import request
 import importlib
-import logging
 
 proxy_suggestion = "Unable to verify https connectivity, " \
                    "required for setup.\n" \
@@ -14,7 +13,6 @@ proxy_suggestion = "Unable to verify https connectivity, " \
 this_dir = Path(__file__).parent.absolute()
 model_dir = 'models'
 install_file = 'install.py'
-log = logging.getLogger(__name__)
 
 
 def _test_https(test_url='https://github.com', timeout=0.5):
