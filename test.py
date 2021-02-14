@@ -40,6 +40,7 @@ class TestBenchmark(TestCase):
             self.assertGreaterEqual(mock_save.call_count, 1)
 
 
+
 def _load_test(model_class, device):
     def model_object(self):
         if device == 'cuda' and not torch.cuda.is_available():
