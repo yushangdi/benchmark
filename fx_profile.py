@@ -181,7 +181,7 @@ def iter_models(args):
             pass
 
 
-def main():
+def main(args):
     parser = argparse.ArgumentParser()
     parser.add_argument("--filter", "-k", action="append",
                         help="filter benchmarks")
@@ -198,7 +198,7 @@ def main():
                         help="enable can_fuse_on_cpu")
     parser.add_argument("--no-skip", "-a", action="store_true",
                         help="run models that don't fx cleanly")
-    args = parser.parse_args()
+    args = parser.parse_args(args)
 
     # defaults
     args.device = args.device or "cpu"
