@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+import csv
 from collections import Counter, defaultdict
 from functools import partial
 from typing import Any, Dict, Callable, Optional
@@ -25,7 +26,7 @@ SKIP = {"attention_is_all_you_need_pytorch", "demucs", "dlrm", "maml",
 
 class ProfileStats(object):
     @staticmethod
-    def _norm(cnt: Counter):
+    def norm(cnt: Counter):
         """ Normalize to unit length """
         total = sum(cnt.values())
         return Counter({k: v / total for k, v in cnt.items()})
@@ -43,7 +44,7 @@ class ProfileStats(object):
         self.counts[name] += 1
 
     def summary(self, n=5):
-        most_common = self._norm(self.times).most_common(n - 1)
+        most_common = self.norm(self.times).most_common(n - 1)
         return " ".join([f"{k}:{v:.0%}" for k, v in most_common] +
                         [f"other:{1.0 - sum(v for k, v in most_common):.0%}"])
 
@@ -56,9 +57,9 @@ class ProfileAggregate(ProfileStats):
 
     def update(self, other: ProfileStats, name):
         """ Merge stats from a finished benchmark run into this """
-        nt = self._norm(other.times).most_common(None)
+        nt = self.norm(other.times).most_common(None)
         self.times.update(nt)
-        self.counts.update(self._norm(other.counts))
+        self.counts.update(self.norm(other.counts))
         self.df = self.df.append(pd.DataFrame(
             [[t for n, t in nt]],
             index=[name],
@@ -144,15 +145,110 @@ class FXProfiler(Interpreter):
         return f"{self.get_name(node)}->{succ_str}"
 
 
+class Conv2dProfiler(Interpreter):
+    convstats = defaultdict(Counter)
+    convlog = csv.writer(open("convlog.csv", "w"))
+    convlog.writerow([
+        "conv2d",
+        "input",
+        "gflops",
+    ])
+
+    def expand(self, x):
+        if isinstance(x, int):
+            return (x,) * 2
+        assert isinstance(x, tuple)
+        return x
+
+    def __init__(self, module: GraphModule):
+        super(Conv2dProfiler, self).__init__(module)
+
+    def call_module(self, target, args, kwargs) -> Any:
+        submod = self.fetch_attr(target)
+        if isinstance(submod, torch.nn.Conv2d):
+            assert len(args) == 1 and len(kwargs) == 0
+            x, = args
+            start = time.perf_counter()
+            result = submod(x)
+            sec = time.perf_counter() - start
+
+            out_channels, in_channels, *kernel_size = submod.weight.shape
+            kernel_size = tuple(kernel_size)
+            bias = submod.bias is not None
+            stride = self.expand(submod.stride)
+            padding = self.expand(submod.padding)
+            dilation = self.expand(submod.dilation)
+            groups = submod.groups
+            in_channels *= groups
+            assert out_channels == submod.out_channels
+            assert in_channels == submod.in_channels
+
+            self.convstats["weight"][str((out_channels, in_channels) + tuple(kernel_size))] += 1
+            self.convstats["bias"][str(bias)] += 1
+            self.convstats["dilation"][str(dilation)] += 1
+
+            if padding != (0, 0):
+                self.convstats["padding"][f"{submod.padding_mode}{padding}"] += 1
+            else:
+                self.convstats["padding"]["none"] += 1
+
+            self.convstats["stride"][str(stride)] += 1
+            self.convstats["groups"][str(groups)] += 1
+
+            self.convstats["dtype"][x.dtype] += 1
+
+            layout = x.stride()
+            if layout == torch.zeros_like(x, memory_format=torch.contiguous_format).stride():
+                self.convstats["in_format"]["contiguous_format"] += 1
+            elif layout == torch.zeros_like(x, memory_format=torch.channels_last).stride():
+                self.convstats["in_format"]["channels_last"] += 1
+            elif layout[-1] == 1:
+                self.convstats["in_format"]["contiguous_format_slice"] += 1
+            elif layout[-3] == 1:
+                self.convstats["in_format"]["channels_last_slice"] += 1
+            else:
+                self.convstats["in_format"]["other"] += 1
+
+            n, ci, hi, wi = x.shape
+            n, co, ho, wo = result.shape
+
+            conv_args = (
+                in_channels,
+                out_channels,
+                kernel_size,
+                stride,
+                padding,
+                dilation,
+                groups,
+                bias,
+                submod.padding_mode
+                # n, hi, wi, gflops
+            )
+
+            flops = n * (co // groups) * (ci // groups) * groups * kernel_size[0] * kernel_size[1] * ho * wo
+            if bias:
+                flops += n * co * ho * wo
+
+            gflops = flops / sec / 1000000000.0
+
+            self.convlog.writerow([repr(conv_args), repr(tuple(x.shape)), f"{gflops:.2f}"])
+            return result
+        return submod(*args, **kwargs)
+
+
 def profile(device, name, model, example_inputs, args):
     model = torch.fx.symbolic_trace(model)
     prof = FXProfiler(model)
+    convprof = Conv2dProfiler(model)
 
     for _ in range(args.warmup):
         model(*example_inputs)
 
     for _ in range(args.repeat):
+        torch.cuda.synchronize()
         prof.run(*example_inputs)
+
+    convprof.run(*example_inputs)
 
     for aggregate, stats in zip(PROFILES, prof.profile_stats):
         print(f"{device:4} {name:20} {aggregate.name:13} {stats.summary()}")
@@ -220,6 +316,9 @@ def main(args=None):
     for prof in PROFILES:
         print("SUMMARY", prof.name, prof.summary(10))
         prof.save()
+
+    for name, stats in sorted(Conv2dProfiler.convstats.items()):
+        print(name, " ".join(f"{k}:{v:.0%}" for k, v in ProfileStats.norm(stats).most_common(10)))
 
 
 if __name__ == '__main__':
