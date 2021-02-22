@@ -222,10 +222,9 @@ class Conv2dProfiler(Interpreter):
                 groups,
                 bias,
                 submod.padding_mode
-                # n, hi, wi, gflops
             )
 
-            flops = n * (co // groups) * (ci // groups) * groups * kernel_size[0] * kernel_size[1] * ho * wo
+            flops = n * (co // groups) * (ci // groups) * groups * kernel_size[0] * kernel_size[1] * ho * wo * 2
             if bias:
                 flops += n * co * ho * wo
 
