@@ -2,6 +2,9 @@
 import csv
 from collections import Counter, defaultdict
 from functools import partial
+from collections import Counter, defaultdict
+from functools import partial
+from torch.cuda import synchronize
 from typing import Any, Dict, Callable, Optional
 import argparse
 import gc
@@ -107,7 +110,7 @@ class FXProfiler(Interpreter):
         """ Timing wrapper around executing an FX Node """
         start = time.perf_counter()
         result = super().run_node(n)
-        torch.cuda.synchronize()
+        synchronize()
         sec = time.perf_counter() - start
         for prof in self.profile_stats:
             prof.record(n, sec)
@@ -244,7 +247,7 @@ def profile(device, name, model, example_inputs, args):
         model(*example_inputs)
 
     for _ in range(args.repeat):
-        torch.cuda.synchronize()
+        synchronize()
         prof.run(*example_inputs)
 
     convprof.run(*example_inputs)
@@ -276,6 +279,10 @@ def iter_models(args):
             pass
 
 
+def noop():
+    pass
+
+
 def main(args=None):
     parser = argparse.ArgumentParser()
     parser.add_argument("--filter", "-k", action="append",
@@ -300,6 +307,10 @@ def main(args=None):
     args.filter = args.filter or [r"."]
     args.exclude = args.exclude or [r"^$"]
 
+    if args.device == "cpu":
+        global synchronize
+        synchronize = noop
+
     if args.no_skip:
         SKIP.clear()
 
@@ -313,11 +324,11 @@ def main(args=None):
         profile(args.device, name, model, example_inputs, args)
 
     for prof in PROFILES:
-        print("SUMMARY", prof.name, prof.summary(10))
         prof.save()
 
     for name, stats in sorted(Conv2dProfiler.convstats.items()):
         print(name, " ".join(f"{k}:{v:.0%}" for k, v in ProfileStats.norm(stats).most_common(10)))
+        prof.save()
 
 
 if __name__ == '__main__':
