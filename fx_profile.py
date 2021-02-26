@@ -1,19 +1,17 @@
 #!/usr/bin/env python
-import csv
-from collections import Counter, defaultdict
-from functools import partial
-from collections import Counter, defaultdict
-from functools import partial
-from torch.cuda import synchronize
-from typing import Any, Dict, Callable, Optional
 import argparse
+import csv
 import gc
 import logging
 import os
-import pandas as pd
 import re
 import time
 import warnings
+from collections import Counter, defaultdict
+from functools import partial
+from typing import Any, Dict, Callable, Optional
+
+import pandas as pd
 
 os.environ["FX_PATCH_GETITEM"] = "1"  # make BERT fx.symbolic_trace
 
@@ -328,7 +326,7 @@ def main(args=None):
 
     for name, stats in sorted(Conv2dProfiler.convstats.items()):
         print(name, " ".join(f"{k}:{v:.0%}" for k, v in ProfileStats.norm(stats).most_common(10)))
-        prof.save()
+    print("wrote convlog.csv")
 
 
 if __name__ == '__main__':
