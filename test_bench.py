@@ -23,14 +23,19 @@ from torchbenchmark.util.model import no_grad
 def pytest_generate_tests(metafunc):
     # This is where the list of models to test can be configured
     # e.g. by using info in metafunc.config
+    devices = ['cpu', 'cuda']
+    if metafunc.config.option.cpu_only:
+        devices = ['cpu']
     all_models = list_models()
     if metafunc.cls and metafunc.cls.__name__ == "TestBenchNetwork":
+        is_eval = metafunc.function.__name__ == "test_eval"
+        test_name = lambda m : m.name + ("-freeze" if is_eval and hasattr(m, "optimized_for_inference") else "")
         metafunc.parametrize('model_class', all_models,
-                             ids=[m.name for m in all_models], scope="class")
-        metafunc.parametrize('device', ['cpu', 'cuda'], scope='class')
+            ids=[test_name(m) for m in all_models], scope="class")
+        metafunc.parametrize('device', devices, scope='class')
         metafunc.parametrize('compiler', ['jit', 'eager'], scope='class')
 
-@pytest.fixture(scope='class')
+@pytest.fixture(scope='function')
 def hub_model(request, model_class, device, compiler):
     """Constructs a model object for pytests to use.
     Any pytest function that consumes a 'modeldef' arg will invoke this
@@ -80,5 +85,7 @@ class TestBenchNetwork:
                 hub_model.set_eval()
                 benchmark(hub_model.eval)
                 benchmark.extra_info['machine_state'] = get_machine_state()
+                if pytestconfig.getoption("check_opt_vs_noopt_jit"):
+                    hub_model.check_opt_vs_noopt_jit()
         except NotImplementedError:
             print('Method eval is not implemented, skipping...')

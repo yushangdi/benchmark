@@ -235,11 +235,11 @@ def set_pstate_frequency(min_freq = 2500, max_freq = 2500):
         for path in freq_paths:
             all_exist = all_exist and os.path.exists(path)
         if all_exist:
-            write_sys_file(freq_paths[0], min_freq * 1000)
-            write_sys_file(freq_paths[1], max_freq * 1000)
+            write_sys_file(freq_paths[0], str(min_freq * 1000))
+            write_sys_file(freq_paths[1], str(max_freq * 1000))
 
 def check_pstate_frequency_pin(pin_freq = 2500):
-    FREQ_THRESHOLD = 10  # Allow 10 MHz difference maximum
+    FREQ_THRESHOLD = 15  # Allow 15 MHz difference maximum
     all_freq = get_pstate_frequency()
     for cpuid in all_freq:
         for attr in all_freq[cpuid]:
@@ -255,7 +255,7 @@ def get_machine_config():
     machine_type = get_machine_type()
     config['machine_type'] = machine_type
     config['cpu_brand'] = cpuinfo.get_cpu_info()['brand_raw']
-    if MACHINE.AMAZON_LINUX == machine_type():
+    if MACHINE.AMAZON_LINUX == machine_type:
         config['linux_distribution'] = distro.linux_distribution()
         config['intel_turbo_disabled'] = check_intel_no_turbo_state()
         config['intel_hyper_threading_enabled'] = hyper_threading_enabled()

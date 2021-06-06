@@ -6,12 +6,14 @@ on:
 jobs:
   run-benchmark:
     if: ${{ github.repository_owner == 'pytorch' }}
-    runs-on: [self-hosted, bm-metal]
+    runs-on: [self-hosted, bm-runner]
+    env:
+      SCRIBE_GRAPHQL_ACCESS_TOKEN: ${{ secrets.SCRIBE_GRAPHQL_ACCESS_TOKEN }}
     steps:
       - name: Check out
         uses: actions/checkout@v2
         with:
-          ref: master
+          ref: gh/taylorrobie/callgrind_scribe2
       - name: Create Conda nightly env
         run: |
           bash .github/scripts/instr-count-benchmark/create-nightly-env.sh
